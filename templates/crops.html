@@ -6,18 +6,17 @@
 {% block content %}
 <div class="crops-container">
     <!-- Filter Controls -->
-    <!-- Filter Controls -->
     <div class="filter-controls">
-        <div class="row g-2 align-items-end">
-            <div class="col-md-2 col-sm-4">
-                <label for="farmFilter" class="form-label small fw-bold">Farm</label>
-                <select class="form-select form-select-sm" id="farmFilter">
+        <div class="row w-100">
+            <div class="col-md-2">
+                <label for="farmFilter" class="form-label">Farm</label>
+                <select class="form-select" id="farmFilter">
                     <option value="">All Farms</option>
                 </select>
             </div>
-            <div class="col-md-2 col-sm-4">
-                <label for="statusFilter" class="form-label small fw-bold">Status</label>
-                <select class="form-select form-select-sm" id="statusFilter">
+            <div class="col-md-2">
+                <label for="statusFilter" class="form-label">Status</label>
+                <select class="form-select" id="statusFilter">
                     <option value="">All Status</option>
                     <option value="planted">Planted</option>
                     <option value="growing">Growing</option>
@@ -26,25 +25,25 @@
                     <option value="failed">Failed</option>
                 </select>
             </div>
-            <div class="col-md-2 col-sm-4">
-                <label for="cropFilter" class="form-label small fw-bold">Crop Type</label>
-                <select class="form-select form-select-sm" id="cropFilter">
+            <div class="col-md-2">
+                <label for="cropFilter" class="form-label">Crop Type</label>
+                <select class="form-select" id="cropFilter">
                     <option value="">All Crops</option>
                 </select>
             </div>
-            <div class="col-md-2 col-sm-6">
-                <label for="searchInput" class="form-label small fw-bold">Search</label>
-                <input type="text" class="form-control form-control-sm" id="searchInput" placeholder="Search crops...">
+            <div class="col-md-2">
+                <label for="searchInput" class="form-label">Search</label>
+                <input type="text" class="form-control" id="searchInput" placeholder="Search crops...">
             </div>
-            <div class="col-md-2 col-sm-3">
+            <div class="col-md-2 d-flex align-items-end">
                 {% if session.role in ['admin','manager'] %}
-                <button class="btn btn-primary btn-sm w-100" data-bs-toggle="modal" data-bs-target="#addCropModal">
+                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addCropModal">
                     <i class="fas fa-plus"></i> Add Crop
                 </button>
                 {% endif %}
             </div>
-            <div class="col-md-2 col-sm-3">
-                <button class="btn btn-success btn-sm w-100" onclick="exportCrops()">
+            <div class="col-md-2 d-flex align-items-end">
+                <button class="btn btn-success" onclick="exportCrops()">
                     <i class="fas fa-download"></i> Export
                 </button>
             </div>
@@ -167,6 +166,17 @@
 
 {% block scripts %}
 <script>
+// Utility function to escape HTML to prevent XSS
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 let cropsData = [];
 let farmsData = [];
 // server-side role (for hiding edit controls). Provided by Jinja.
@@ -177,42 +187,6 @@ document.addEventListener('DOMContentLoaded', function() {
     loadCrops();
     setupEventListeners();
 });
-
-// Helper functions
-function hideModal(modalId) {
-    const modal = document.getElementById(modalId);
-    const modalInstance = bootstrap.Modal.getInstance(modal);
-    if (modalInstance) {
-        modalInstance.hide();
-    }
-}
-
-function showModal(modalId) {
-    const modal = new bootstrap.Modal(document.getElementById(modalId));
-    modal.show();
-}
-
-function showError(element, message) {
-    // Simple error display - you might have a more sophisticated method
-    alert('Error: ' + message);
-}
-
-function showSuccess(message) {
-    // Simple success display
-    alert('Success: ' + message);
-}
-
-function showLoading(element) {
-    if (element) {
-        element.innerHTML = `
-            <div class="text-center p-4">
-                <div class="spinner-border" role="status">
-                    <span class="visually-hidden">Loading...</span>
-                </div>
-            </div>
-        `;
-    }
-}
 
 function setupEventListeners() {
     // Add crop form submission (used for both add & edit)
@@ -586,18 +560,6 @@ function resetCropForm() {
     document.getElementById('editCropId').value = '';
 }
 
-// Formatting helper functions
-function formatNumber(value, decimals = 2) {
-    if (value === null || value === undefined) return 'N/A';
-    return parseFloat(value).toFixed(decimals);
-}
-
-function formatDate(dateString) {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    return date.toLocaleDateString();
-}
-
 function escapeHtml(unsafe) {
     if (!unsafe) return '';
     return unsafe
@@ -606,40 +568,6 @@ function escapeHtml(unsafe) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
-}
-
-function exportToCSV(data, filename) {
-    if (data.length === 0) return;
-    
-    const headers = ['Crop Name', 'Variety', 'Farm', 'Area (Acres)', 'Status', 'Planting Date', 'Harvest Date', 'Expected Yield', 'Notes'];
-    const csvData = data.map(crop => [
-        crop.crop_name || '',
-        crop.variety || '',
-        crop.farm_name || '',
-        crop.area_acres || '',
-        crop.status || '',
-        crop.planting_date || '',
-        crop.harvest_date || '',
-        crop.expected_yield || '',
-        crop.notes || ''
-    ]);
-    
-    const csvContent = [
-        headers.join(','),
-        ...csvData.map(row => row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(','))
-    ].join('\n');
-    
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    
-    link.setAttribute('href', url);
-    link.setAttribute('download', filename);
-    link.style.visibility = 'hidden';
-    
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
 }
 
 function createStatusBadge(status) {
@@ -655,18 +583,6 @@ function createStatusBadge(status) {
     };
     const badgeClass = statusMap[status] || 'bg-secondary';
     return `<span class="badge ${badgeClass}">${status}</span>`;
-}
-// Short date format for table
-function formatDateShort(dateString) {
-    if (!dateString) return '-';
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
-// Compact number format
-function formatNumberCompact(value, decimals = 1) {
-    if (value === null || value === undefined) return '-';
-    return parseFloat(value).toFixed(decimals);
 }
 </script>
 {% endblock %}

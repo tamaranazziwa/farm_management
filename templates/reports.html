@@ -56,7 +56,7 @@
     <!-- Report Filters -->
     <div class="filter-controls">
         <div class="row w-100">
-            <div class="col-md-3">
+            <div class="col-md-2">
                 <label for="reportType" class="form-label">Report Type</label>
                 <select class="form-select" id="reportType">
                     <option value="performance">Performance Report</option>
@@ -65,7 +65,7 @@
                     <option value="livestock">Livestock Report</option>
                 </select>
             </div>
-            <div class="col-md-3">
+            <div class="col-md-2">
                 <label for="farmFilter" class="form-label">Farm</label>
                 <select class="form-select" id="farmFilter">
                     <option value="">All Farms</option>
@@ -84,15 +84,15 @@
                     <i class="fas fa-sync-alt"></i> Generate
                 </button>
             </div>
-        </div>
-        <div class="row w-100 mt-3">
-            <div class="col-md-3">
+            <div class="col-md-2 d-flex align-items-end">
                 {% if session.role in ['admin','manager'] %}
-                <button class="btn btn-success" data-bs-toggle="modal" data-bs-target="#saveReportModal">
+                <button class="btn btn-success w-100" data-bs-toggle="modal" data-bs-target="#saveReportModal">
                     <i class="fas fa-save"></i> Save Report
                 </button>
                 {% endif %}
             </div>
+        </div>
+        <div class="row w-100 mt-3">
             <div class="col-md-3">
                 <button class="btn btn-info" onclick="exportReport()">
                     <i class="fas fa-download"></i> Export PDF
@@ -190,29 +190,6 @@
             <div class="text-center p-4">
                 <div class="spinner-border" role="status">
                     <span class="visually-hidden">Loading...</span>
-                </div>
-            </div>
-        </div>
-    </div>
-
-        <!-- Predictive Insights Section -->
-    <div class="row mb-4" id="predictiveInsightsSection">
-        <div class="col-md-12">
-            <div class="chart-card">
-                <div class="chart-header d-flex justify-content-between align-items-center">
-                    <h5><i class="fas fa-chart-line"></i> Predictive Insights & Recommendations</h5>
-                    <button class="btn btn-sm btn-outline-primary" onclick="loadPredictiveInsights()">
-                        <i class="fas fa-sync-alt"></i> Refresh Insights
-                    </button>
-                </div>
-                <div class="chart-body">
-                    <div id="predictiveInsightsContent">
-                        <div class="text-center p-4">
-                            <div class="spinner-border" role="status">
-                                <span class="visually-hidden">Loading insights...</span>
-                            </div>
-                        </div>
-                    </div>
                 </div>
             </div>
         </div>
@@ -1102,10 +1079,16 @@ function generateRevenueChart(revenueData) {
         ? revenueData.map(item => parseFloat(item.total))
         : [65, 25, 8, 2];
     
+    const total = data.reduce((a, b) => a + b, 0);
+    const labelsWithPct = labels.map((label, i) => {
+        const pct = total > 0 ? ((data[i] / total) * 100).toFixed(1) : '0.0';
+        return `${label} (${pct}%)`;
+    });
+    
     chartInstances.revenueChart = new Chart(ctx, {
         type: 'doughnut',
         data: {
-            labels: labels,
+            labels: labelsWithPct,
             datasets: [{
                 data: data,
                 backgroundColor: [
@@ -1122,6 +1105,13 @@ function generateRevenueChart(revenueData) {
             plugins: {
                 legend: {
                     position: 'bottom',
+                    labels: {
+                        padding: 15,
+                        usePointStyle: true,
+                        font: {
+                            size: 11
+                        }
+                    }
                 },
                 tooltip: {
                     callbacks: {
@@ -1129,7 +1119,8 @@ function generateRevenueChart(revenueData) {
                             const value = context.parsed;
                             const total = context.dataset.data.reduce((a, b) => a + b, 0);
                             const percentage = ((value / total) * 100).toFixed(1);
-                            return `${context.label}: ${formatCurrency(value)} (${percentage}%)`;
+                            const originalLabel = labels[context.dataIndex];
+                            return `${originalLabel}: ${formatCurrency(value)} (${percentage}%)`;
                         }
                     }
                 }
@@ -1155,10 +1146,16 @@ function generateExpenseChart(expenseData) {
         ? expenseData.map(item => parseFloat(item.total))
         : [40, 25, 15, 10, 10];
     
+    const total = data.reduce((a, b) => a + b, 0);
+    const labelsWithPct = labels.map((label, i) => {
+        const pct = total > 0 ? ((data[i] / total) * 100).toFixed(1) : '0.0';
+        return `${label} (${pct}%)`;
+    });
+    
     chartInstances.expenseChart = new Chart(ctx, {
         type: 'pie',
         data: {
-            labels: labels,
+            labels: labelsWithPct,
             datasets: [{
                 data: data,
                 backgroundColor: [
@@ -1175,6 +1172,13 @@ function generateExpenseChart(expenseData) {
             plugins: {
                 legend: {
                     position: 'bottom',
+                    labels: {
+                        padding: 15,
+                        usePointStyle: true,
+                        font: {
+                            size: 11
+                        }
+                    }
                 },
                 tooltip: {
                     callbacks: {
@@ -1182,7 +1186,8 @@ function generateExpenseChart(expenseData) {
                             const value = context.parsed;
                             const total = context.dataset.data.reduce((a, b) => a + b, 0);
                             const percentage = ((value / total) * 100).toFixed(1);
-                            return `${context.label}: ${formatCurrency(value)} (${percentage}%)`;
+                            const originalLabel = labels[context.dataIndex];
+                            return `${originalLabel}: ${formatCurrency(value)} (${percentage}%)`;
                         }
                     }
                 }
@@ -2143,6 +2148,76 @@ function setupEventListeners() {
             printReport();
         });
     }
+}
+
+// Save Report Function
+function saveReport() {
+    const reportName = document.getElementById('reportName').value.trim();
+    const reportDescription = document.getElementById('reportDescription').value.trim();
+    const farmFilter = document.getElementById('farmFilter').value;
+    const reportType = document.getElementById('reportType').value;
+
+    if (!reportName) {
+        alert('Please enter a report name');
+        return;
+    }
+
+    if (!farmFilter) {
+        alert('Please select a farm to save the report');
+        return;
+    }
+
+    // Collect current report data
+    const reportData = {
+        summary: {
+            totalRevenue: document.getElementById('totalRevenue').textContent,
+            totalExpenses: document.getElementById('totalExpenses').textContent,
+            profitMargin: document.getElementById('profitMargin').textContent,
+            activeCrops: document.getElementById('activeCrops').textContent
+        },
+        filters: {
+            reportType: reportType,
+            farmFilter: farmFilter,
+            dateFrom: document.getElementById('dateFrom').value,
+            dateTo: document.getElementById('dateTo').value
+        },
+        performanceData: performanceData,
+        timestamp: new Date().toISOString()
+    };
+
+    fetch('/api/reports/save', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            name: reportName,
+            description: reportDescription,
+            farm_id: farmFilter,
+            report_type: reportType,
+            data: reportData
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            alert('Error saving report: ' + data.error);
+        } else {
+            alert(data.message);
+            // Close the modal
+            const modal = bootstrap.Modal.getInstance(document.getElementById('saveReportModal'));
+            if (modal) {
+                modal.hide();
+            }
+            // Clear the form
+            document.getElementById('reportName').value = '';
+            document.getElementById('reportDescription').value = '';
+        }
+    })
+    .catch(error => {
+        console.error('Error saving report:', error);
+        alert('Failed to save report. Please try again.');
+    });
 }
 </script>
 {% endblock %}

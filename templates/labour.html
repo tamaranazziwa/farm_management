@@ -7,13 +7,13 @@
 <div class="crops-container"> <!-- reuse same container classes for identical style -->
   <div class="filter-controls">
     <div class="row w-100">
-      <div class="col-md-3">
+      <div class="col-md-2">
         <label for="farmFilter" class="form-label">Farm</label>
         <select class="form-select" id="farmFilter">
           <option value="">All Farms</option>
         </select>
       </div>
-      <div class="col-md-3">
+      <div class="col-md-2">
         <label for="roleFilter" class="form-label">Role</label>
         <select class="form-select" id="roleFilter">
           <option value="">All Roles</option>
@@ -22,17 +22,22 @@
           <option value="manager">Manager</option>
         </select>
       </div>
-      <div class="col-md-3">
+      <div class="col-md-2">
         <label for="searchInput" class="form-label">Search</label>
         <input type="text" class="form-control" id="searchInput" placeholder="Search workers...">
       </div>
-      <div class="col-md-3 d-flex align-items-end">
+      <div class="col-md-2 d-flex align-items-end">
         {% if session.role in ['admin','manager'] %}
         <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addLabourModal">
           <i class="fas fa-plus"></i> Add Worker
         </button>
         {% endif %}
-        <button class="btn btn-success ms-2" onclick="exportLabour()"> <i class="fas fa-download"></i> Export</button>
+      </div>
+      <div class="col-md-2 d-flex align-items-end">
+        <button class="btn btn-success" onclick="exportLabour()"> <i class="fas fa-download"></i> Export</button>
+      </div>
+      <div class="col-md-2 d-flex align-items-end">
+        <button class="btn btn-info" onclick="exportLabour()"> <i class="fas fa-print"></i> Print</button>
       </div>
     </div>
   </div>
@@ -113,6 +118,17 @@
 
 {% block scripts %}
 <script>
+// Utility function to escape HTML to prevent XSS
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 let labourData = [];
 let farmsData = [];
 const userRole = "{{ session.role|default('') }}";
@@ -173,51 +189,61 @@ function displayLabour(list) {
 
   let html = `
     <div class="table-responsive">
-      <table class="table table-striped table-hover">
+      <table class="table table-striped table-hover table-sm">
         <thead>
           <tr>
-            <th>Name</th>
-            <th>Farm</th>
-            <th>Phone</th>
-            <th>Role</th>
-            <th>Hired Date</th>
-            <th>Actions</th>
+            <th width="20%">Name</th>
+            <th width="15%">Farm</th>
+            <th width="15%">Phone</th>
+            <th width="15%">Role</th>
+            <th width="15%">Hired Date</th>
+            <th width="20%">Actions</th>
           </tr>
         </thead>
         <tbody>
   `;
 
   list.forEach(worker => {
+    const roleMap = {
+        'worker': { class: 'bg-primary', text: 'Worker', icon: 'fa-user' },
+        'supervisor': { class: 'bg-success', text: 'Supervisor', icon: 'fa-user-tie' },
+        'manager': { class: 'bg-warning', text: 'Manager', icon: 'fa-user-cog' },
+        'other': { class: 'bg-secondary', text: 'Other', icon: 'fa-user' }
+    };
+    const role = roleMap[worker.role] || { class: 'bg-secondary', text: worker.role, icon: 'fa-user' };
+
     html += `
       <tr>
-        <td>${escapeHtml(worker.first_name || '')} ${escapeHtml(worker.last_name || '')}</td>
-        <td>${escapeHtml(worker.farm_name || 'N/A')}</td>
-        <td>${escapeHtml(worker.phone || 'N/A')}</td>
-        <td><span class="badge bg-secondary">${worker.role ? worker.role.charAt(0).toUpperCase() + worker.role.slice(1) : 'N/A'}</span></td>
-        <td>${worker.hired_date ? formatDate(worker.hired_date) : 'N/A'}</td>
+        <td><strong>${escapeHtml(worker.first_name || '')} ${escapeHtml(worker.last_name || '')}</strong></td>
+        <td><small>${escapeHtml(worker.farm_name || 'N/A')}</small></td>
+        <td><small>${escapeHtml(worker.phone || 'N/A')}</small></td>
         <td>
-          <div class="btn-group">
-            <button class="btn btn-sm btn-outline-primary" onclick="viewWorker(${worker.id})" title="View">
+            <span class="badge ${role.class}">
+                <i class="fas ${role.icon} me-1"></i>${role.text}
+            </span>
+        </td>
+        <td><small>${worker.hired_date ? formatDateShort(worker.hired_date) : 'N/A'}</small></td>
+        <td>
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-primary" onclick="viewWorker(${worker.id})" title="View">
               <i class="fas fa-eye"></i>
             </button>
     `;
     
     if (['admin','manager'].includes(userRole)) {
       html += `
-            <button class="btn btn-sm btn-outline-success ms-1" onclick="editWorker(${worker.id})" title="Edit">
+            <button class="btn btn-outline-success" onclick="editWorker(${worker.id})" title="Edit">
               <i class="fas fa-edit"></i>
             </button>
-            <div class="btn-group ms-1">
-              <button class="btn btn-sm btn-outline-info dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Quick Actions">
-                <i class="fas fa-bolt"></i>
-              </button>
-              <ul class="dropdown-menu">
-                <li><a class="dropdown-item" href="#" onclick="assignTaskToWorker(${worker.id})">Assign Task</a></li>
-                <li><a class="dropdown-item" href="#" onclick="viewWorkerTasks(${worker.id})">View Tasks</a></li>
-                <li><hr class="dropdown-divider"></li>
-                <li><a class="dropdown-item text-danger" href="#" onclick="deleteWorker(${worker.id})">Delete Worker</a></li>
-              </ul>
-            </div>
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" title="More">
+              <i class="fas fa-ellipsis-v"></i>
+            </button>
+            <ul class="dropdown-menu">
+              <li><a class="dropdown-item" href="#" onclick="assignTaskToWorker(${worker.id})">Assign Task</a></li>
+              <li><a class="dropdown-item" href="#" onclick="viewWorkerTasks(${worker.id})">View Tasks</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item text-danger" href="#" onclick="deleteWorker(${worker.id})">Delete Worker</a></li>
+            </ul>
       `;
     }
     
@@ -228,7 +254,11 @@ function displayLabour(list) {
     `;
   });
 
-  html += `</tbody></table></div>`;
+  html += `
+        </tbody>
+      </table>
+    </div>
+  `;
   container.innerHTML = html;
 }
 
@@ -437,54 +467,5 @@ function viewWorkerTasks(workerId) {
     });
 }
 
-// Utility functions
-function showLoading(element) {
-  if (element) {
-    element.innerHTML = '<div class="text-center p-4"><div class="spinner-border" role="status"><span class="visually-hidden">Loading...</span></div></div>';
-  }
-}
-
-function showError(message) {
-  alert('Error: ' + message);
-}
-
-function showSuccess(message) {
-  alert('Success: ' + message);
-}
-
-function formatDate(dateString) {
-  if (!dateString) return 'N/A';
-  const date = new Date(dateString);
-  return date.toLocaleDateString();
-}
-
-function escapeHtml(unsafe) {
-  if (!unsafe) return '';
-  return unsafe
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function exportToCSV(data, headers, filename) {
-  const csvContent = [
-    headers.join(','),
-    ...data.map(row => row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(','))
-  ].join('\n');
-  
-  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
-  const url = URL.createObjectURL(blob);
-  
-  link.setAttribute('href', url);
-  link.setAttribute('download', filename);
-  link.style.visibility = 'hidden';
-  
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
 </script>
 {% endblock %}

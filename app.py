@@ -1,13 +1,28 @@
-from flask import Flask,Blueprint,render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask.json.provider import DefaultJSONProvider
+import json
 from flask_cors import CORS
 import mysql.connector
 from mysql.connector import Error
-import json
-from functools import lru_cache
+from functools import lru_cache, wraps
 from datetime import datetime, timedelta, date
-import hashlib
+from decimal import Decimal
 import os
-from functools import wraps
+from werkzeug.security import check_password_hash
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class CustomJSONProvider(DefaultJSONProvider):
+    """Serialize MySQL date/decimal types for API responses."""
+
+    def default(self, o):
+        if isinstance(o, (datetime, date)):
+            return o.isoformat()
+        if isinstance(o, Decimal):
+            return float(o)
+        return super().default(o)
 
 # Add caching for frequently accessed data
 @lru_cache(maxsize=128)
@@ -27,17 +42,23 @@ def get_cached_farms():
     except Error:
         return []
 
+
+def clear_farms_cache():
+    """Invalidate cached farm list after mutations."""
+    get_cached_farms.cache_clear()
+
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-change-this-in-production'
+app.json_provider_class = CustomJSONProvider
+app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-change-in-production')
 CORS(app)
 
-# Database configuration
+# Database configuration (override via .env)
 DB_CONFIG = {
-    'host': 'localhost',
-    'user': 'root',
-    'password': '',
-    'database': 'farm_management',
-    'port': 3306
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'database': os.getenv('DB_NAME', 'farm_management'),
+    'port': int(os.getenv('DB_PORT', 3306)),
 }
 
 def get_db_connection():
@@ -94,16 +115,19 @@ def validate_json(*expected_args):
 @app.route('/')
 def index():
     """Redirect to dashboard if logged in, otherwise to login"""
-    # Clear any existing session to ensure fresh login
-    session.clear()
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """Login page and authentication"""
     if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+
+        if not username or not password:
+            return render_template('login.html', error='Please enter both username and password')
         
         connection = get_db_connection()
         if connection:
@@ -111,16 +135,15 @@ def login():
             cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
             user = cursor.fetchone()
             
-            # SECURE PASSWORD CHECK - For demo, using simple password check
+            # Secure password verification against the stored hash
             if user and user['password_hash']:
-                # Demo credentials check
-                demo_passwords = {
-                    'admin': 'password',
-                    'manager': 'password', 
-                    'worker': 'password'
-                }
+                try:
+                    password_valid = check_password_hash(user['password_hash'], password)
+                except Exception:
+                    # Malformed/legacy hash in database - treat as invalid password
+                    password_valid = False
                 
-                if username in demo_passwords and password == demo_passwords[username]:
+                if password_valid:
                     session['user_id'] = user['id']
                     session['username'] = user['username']
                     session['role'] = user['role']
@@ -221,8 +244,54 @@ def critical_alerts():
                 'priority': 'medium',
                 'title': 'Overdue Task',
                 'message': f"'{task['title']}' is {days_overdue} days overdue",
-                'icon': 'fa-tasks'
+                'icon': 'fa-tasks',
+                'timestamp': datetime.now().isoformat()
             })
+        
+        # Check for crops ready for harvest
+        cursor.execute("""
+            SELECT crop_name, harvest_date, farm_id
+            FROM crops 
+            WHERE status = 'ready_harvest'
+        """)
+        harvest_alerts = cursor.fetchall()
+        
+        for crop in harvest_alerts:
+            alerts.append({
+                'type': 'crop',
+                'priority': 'medium',
+                'title': 'Ready for Harvest',
+                'message': f"{crop['crop_name']} is ready for harvest",
+                'icon': 'fa-seedling',
+                'timestamp': datetime.now().isoformat()
+            })
+        
+        # Check for low stock inventory (quantity below 10 units)
+        cursor.execute("""
+            SELECT item_name, quantity, unit
+            FROM inventory 
+            WHERE quantity < 10
+        """)
+        inventory_alerts = cursor.fetchall()
+        
+        for item in inventory_alerts:
+            alerts.append({
+                'type': 'inventory',
+                'priority': 'high' if float(item['quantity']) <= 2 else 'medium',
+                'title': 'Low Stock',
+                'message': f"{item['item_name']} is running low ({item['quantity']} {item['unit'] or 'units'} remaining)",
+                'icon': 'fa-boxes',
+                'timestamp': datetime.now().isoformat()
+            })
+        
+        # Add timestamps to earlier alerts
+        now_str = datetime.now().isoformat()
+        for alert in alerts:
+            if 'timestamp' not in alert:
+                alert['timestamp'] = now_str
+        
+        # Sort: high priority first
+        alerts.sort(key=lambda a: 0 if a.get('priority') == 'high' else 1)
         
         cursor.close()
         connection.close()
@@ -244,7 +313,6 @@ def format_sh(value):
 
 
 @app.route('/api/charts/revenue-expense')
-@login_required
 def revenue_expense_chart():
     """Get revenue and expense data for charts with period parameter"""
     period = request.args.get('period', '6')  # Default to 6 months
@@ -252,72 +320,83 @@ def revenue_expense_chart():
         period = int(period)
     except ValueError:
         period = 6
-    
+
     # Ensure period is within reasonable bounds
     if period not in [3, 6, 12]:
         period = 6
-    
+
     connection = get_db_connection()
     if not connection:
         return jsonify({'error': 'Database connection failed'}), 500
-    
+
     try:
         cursor = connection.cursor(dictionary=True)
-        
-        # Get last N months data based on period
+
+        # Get ALL financial records grouped by month
         cursor.execute("""
-            SELECT 
+            SELECT
                 DATE_FORMAT(transaction_date, '%Y-%m') as month,
                 transaction_type,
                 SUM(amount) as total
-            FROM financial_records 
-            WHERE transaction_date >= DATE_SUB(CURRENT_DATE(), INTERVAL %s MONTH)
+            FROM financial_records
             GROUP BY DATE_FORMAT(transaction_date, '%Y-%m'), transaction_type
             ORDER BY month
-        """, (period,))
-        
+        """)
+
         data = cursor.fetchall()
-        
-        # Process data for chart
-        months = []
-        revenue = []
-        expenses = []
-        
-        # Generate last N months strings (YYYY-MM) in chronological order
-        today = datetime.now()
-        months_list = []
-        for i in range(period - 1, -1, -1):
-            m = (today - timedelta(days=30*i)).strftime('%Y-%m')
-            months_list.append(m)
-        months = months_list
-        revenue = [0]*len(months)
-        expenses = [0]*len(months)
-        
+        print(f"Chart data query result: {data}")
+
+        # Get unique months from the data
+        unique_months = sorted(list(set(row['month'] for row in data)))
+        print(f"Unique months found: {unique_months}")
+
+        # If no data, return empty arrays
+        if not unique_months:
+            print("No financial data found in database")
+            return jsonify({
+                'months': [],
+                'revenue': [],
+                'expenses': [],
+                'period': period
+            })
+
+        # Limit to the most recent N months if we have more than period
+        if len(unique_months) > period:
+            unique_months = unique_months[-period:]
+
+        months = unique_months
+        revenue = [0.0]*len(months)
+        expenses = [0.0]*len(months)
+
+        print(f"Using months: {months}")
+
         for row in data:
             month = row['month']
             if month in months:
                 idx = months.index(month)
                 if row['transaction_type'] == 'revenue':
                     revenue[idx] = float(row['total'])
-                else:
+                elif row['transaction_type'] == 'expense':
                     expenses[idx] = float(row['total'])
-        
+
+        print(f"Final revenue array: {revenue}")
+        print(f"Final expenses array: {expenses}")
+
         cursor.close()
         connection.close()
-        
+
         return jsonify({
             'months': months,
             'revenue': revenue,
             'expenses': expenses,
-            'period': period  # Return the period used for reference
+            'period': period
         })
-        
+
     except Error as e:
         print(f"Database error: {e}")
         return jsonify({'error': 'Database error'}), 500
 
 @app.route('/api/charts/crop-distribution')
-@login_required
 def crop_distribution_chart():
     """Get crop distribution data for pie chart"""
     connection = get_db_connection()
@@ -352,7 +431,6 @@ def crop_distribution_chart():
         return jsonify({'error': 'Database error'}), 500
 
 @app.route('/api/charts/livestock-health')
-@login_required
 def livestock_health_chart():
     """Get livestock health status data"""
     connection = get_db_connection()
@@ -433,6 +511,54 @@ def get_farm_single(farm_id):
         print(f"Database error: {e}")
         return jsonify({'error': 'Database error'}), 500
 
+@app.route('/api/farms/<int:farm_id>/stats')
+@login_required
+def get_farm_stats(farm_id):
+    """Get summary statistics for a single farm"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("SELECT id FROM farms WHERE id = %s", (farm_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            connection.close()
+            return jsonify({'error': 'Farm not found'}), 404
+
+        cursor.execute("SELECT COUNT(*) AS total FROM crops WHERE farm_id = %s", (farm_id,))
+        total_crops = cursor.fetchone()['total']
+
+        cursor.execute(
+            "SELECT COUNT(*) AS total FROM livestock WHERE farm_id = %s AND health_status != 'deceased'",
+            (farm_id,),
+        )
+        total_livestock = cursor.fetchone()['total']
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS total FROM tasks
+            WHERE farm_id = %s AND status NOT IN ('completed', 'cancelled')
+            """,
+            (farm_id,),
+        )
+        active_tasks = cursor.fetchone()['total']
+
+        cursor.execute("SELECT COUNT(*) AS total FROM labour WHERE farm_id = %s", (farm_id,))
+        total_workers = cursor.fetchone()['total']
+
+        cursor.close()
+        connection.close()
+        return jsonify({
+            'total_crops': total_crops,
+            'total_livestock': total_livestock,
+            'active_tasks': active_tasks,
+            'total_workers': total_workers,
+        })
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
 @app.route('/api/farms', methods=['POST'])
 @login_required
 @role_required('admin','manager')
@@ -464,6 +590,7 @@ def create_farm():
         
         cursor.close()
         connection.close()
+        clear_farms_cache()
         
         return jsonify({'id': farm_id, 'message': 'Farm created successfully'})
         
@@ -499,6 +626,7 @@ def update_farm(farm_id):
         connection.commit()
         cursor.close()
         connection.close()
+        clear_farms_cache()
         return jsonify({'message': 'Farm updated successfully'})
     except Error as e:
         print(f"Database error: {e}")
@@ -753,7 +881,277 @@ def update_livestock(animal_id):
     except Error as e:
         print(f"Database error: {e}")
         return jsonify({'error': 'Database error'}), 500
-    
+
+
+# ----------------- Equipment Management Routes -----------------
+@app.route('/equipment')
+@login_required
+def equipment_page():
+    """Equipment management page"""
+    return render_template('equipment.html')
+
+
+@app.route('/api/equipment')
+@login_required
+def get_equipment():
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT e.*, f.name as farm_name
+            FROM equipment e
+            JOIN farms f ON e.farm_id = f.id
+            ORDER BY e.created_at DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        connection.close()
+        return jsonify(rows)
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/equipment/<int:equipment_id>')
+@login_required
+def get_equipment_single(equipment_id):
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT e.*, f.name as farm_name
+            FROM equipment e
+            JOIN farms f ON e.farm_id = f.id
+            WHERE e.id = %s
+        """, (equipment_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        connection.close()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        return jsonify(row)
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/equipment', methods=['POST'])
+@login_required
+@role_required('admin', 'manager')
+@validate_json('farm_id', 'equipment_name')
+def create_equipment():
+    data = request.get_json()
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            INSERT INTO equipment (
+                farm_id, equipment_name, equipment_type, brand, model,
+                purchase_date, purchase_price, condition_status, maintenance_due, notes
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            data.get('farm_id'),
+            data.get('equipment_name'),
+            data.get('equipment_type'),
+            data.get('brand'),
+            data.get('model'),
+            data.get('purchase_date'),
+            data.get('purchase_price'),
+            data.get('condition_status', 'good'),
+            data.get('maintenance_due'),
+            data.get('notes'),
+        ))
+        connection.commit()
+        equipment_id = cursor.lastrowid
+        cursor.close()
+        connection.close()
+        return jsonify({'id': equipment_id, 'message': 'Equipment added successfully'})
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/equipment/<int:equipment_id>', methods=['PUT'])
+@login_required
+@role_required('admin', 'manager')
+def update_equipment(equipment_id):
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid payload'}), 400
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            UPDATE equipment
+            SET farm_id=%s, equipment_name=%s, equipment_type=%s, brand=%s, model=%s,
+                purchase_date=%s, purchase_price=%s, condition_status=%s,
+                maintenance_due=%s, notes=%s, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+        """, (
+            data.get('farm_id'),
+            data.get('equipment_name'),
+            data.get('equipment_type'),
+            data.get('brand'),
+            data.get('model'),
+            data.get('purchase_date'),
+            data.get('purchase_price'),
+            data.get('condition_status'),
+            data.get('maintenance_due'),
+            data.get('notes'),
+            equipment_id,
+        ))
+        connection.commit()
+        cursor.close()
+        connection.close()
+        return jsonify({'message': 'Equipment updated successfully'})
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+# ----------------- Inventory Management Routes -----------------
+@app.route('/inventory')
+@login_required
+def inventory_page():
+    """Inventory management page"""
+    return render_template('inventory.html')
+
+
+@app.route('/api/inventory')
+@login_required
+def get_inventory():
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT i.*, f.name as farm_name
+            FROM inventory i
+            JOIN farms f ON i.farm_id = f.id
+            ORDER BY i.created_at DESC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        connection.close()
+        return jsonify(rows)
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/inventory/<int:item_id>')
+@login_required
+def get_inventory_single(item_id):
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT i.*, f.name as farm_name
+            FROM inventory i
+            JOIN farms f ON i.farm_id = f.id
+            WHERE i.id = %s
+        """, (item_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        connection.close()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        return jsonify(row)
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/inventory', methods=['POST'])
+@login_required
+@role_required('admin', 'manager')
+@validate_json('farm_id', 'item_name', 'quantity')
+def create_inventory_item():
+    data = request.get_json()
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            INSERT INTO inventory (
+                farm_id, item_name, category, quantity, unit, unit_price,
+                supplier, purchase_date, expiry_date, location, notes
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            data.get('farm_id'),
+            data.get('item_name'),
+            data.get('category'),
+            data.get('quantity'),
+            data.get('unit'),
+            data.get('unit_price'),
+            data.get('supplier'),
+            data.get('purchase_date'),
+            data.get('expiry_date'),
+            data.get('location'),
+            data.get('notes'),
+        ))
+        connection.commit()
+        item_id = cursor.lastrowid
+        cursor.close()
+        connection.close()
+        return jsonify({'id': item_id, 'message': 'Inventory item added successfully'})
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/inventory/<int:item_id>', methods=['PUT'])
+@login_required
+@role_required('admin', 'manager')
+def update_inventory_item(item_id):
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid payload'}), 400
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            UPDATE inventory
+            SET farm_id=%s, item_name=%s, category=%s, quantity=%s, unit=%s,
+                unit_price=%s, supplier=%s, purchase_date=%s, expiry_date=%s,
+                location=%s, notes=%s, updated_at=CURRENT_TIMESTAMP
+            WHERE id=%s
+        """, (
+            data.get('farm_id'),
+            data.get('item_name'),
+            data.get('category'),
+            data.get('quantity'),
+            data.get('unit'),
+            data.get('unit_price'),
+            data.get('supplier'),
+            data.get('purchase_date'),
+            data.get('expiry_date'),
+            data.get('location'),
+            data.get('notes'),
+            item_id,
+        ))
+        connection.commit()
+        cursor.close()
+        connection.close()
+        return jsonify({'message': 'Inventory item updated successfully'})
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
 
 # ----------------- Labour Management Routes -----------------
 @app.route('/labour')
@@ -1017,6 +1415,9 @@ def update_task(task_id):
             if key in data:
                 fields.append(f"{key} = %s")
                 params.append(data.get(key))
+        if 'status' in data and data.get('status') == 'completed':
+            fields.append("completed_date = %s")
+            params.append(date.today())
         if not fields:
             return jsonify({'message': 'No changes provided'})
         params.append(task_id)
@@ -1091,7 +1492,7 @@ def dashboard_stats():
               AND YEAR(transaction_date) = YEAR(CURRENT_DATE())
         """)
         monthly_expenses = cursor.fetchone()['total']
-        # recent activities (crops, livestock, tasks)
+        # recent activities (crops, livestock, tasks, financial, farms)
         cursor.execute("""
             SELECT 'crop' as type, crop_name as name, status, updated_at
             FROM crops
@@ -1113,9 +1514,29 @@ def dashboard_stats():
             LIMIT 5
         """)
         recent_tasks = cursor.fetchall()
+        cursor.execute("""
+            SELECT 'financial' as type,
+                   CONCAT(transaction_type, ': ', category) as name,
+                   CONCAT('SH ', FORMAT(amount, 0)) as status,
+                   updated_at
+            FROM financial_records
+            ORDER BY updated_at DESC
+            LIMIT 5
+        """)
+        recent_financial = cursor.fetchall()
+        cursor.execute("""
+            SELECT 'farm' as type, name, status, updated_at
+            FROM farms
+            ORDER BY updated_at DESC
+            LIMIT 3
+        """)
+        recent_farms = cursor.fetchall()
         # combine and sort
-        recent_activities = recent_crops + recent_livestock + recent_tasks
-        recent_activities.sort(key=lambda x: x['updated_at'] or x.get('created_at', ''), reverse=True)
+        recent_activities = recent_crops + recent_livestock + recent_tasks + recent_financial + recent_farms
+        recent_activities.sort(
+            key=lambda x: x.get('updated_at') or datetime.min,
+            reverse=True
+        )
         cursor.close()
         connection.close()
         monthly_profit = float(monthly_revenue) - float(monthly_expenses)
@@ -1195,8 +1616,6 @@ def get_financial_records():
     date_from = request.args.get('date_from')
     date_to = request.args.get('date_to')
     
-    print(f"DEBUG: Received filters - farm_id: {farm_id}, type: {transaction_type}, category: {category}")
-    
     connection = get_db_connection()
     if not connection:
         return jsonify({'error': 'Database connection failed'}), 500
@@ -1233,15 +1652,10 @@ def get_financial_records():
             params.append(date_to)
         
         query += " ORDER BY fr.transaction_date DESC"
-        
-        print(f"DEBUG: Executing query: {query}")
-        print(f"DEBUG: With params: {params}")
-        
+
         cursor.execute(query, params)
         records = cursor.fetchall()
-        
-        print(f"DEBUG: Found {len(records)} records")
-        
+
         cursor.close()
         connection.close()
         
@@ -1347,18 +1761,12 @@ def update_financial_record(tx_id):
             connection.close()
             return jsonify({'error': 'Not found'}), 404
 
-        # allow if admin/manager or if created_by equals session user (created_by may be NULL in older records)
+        # The @role_required decorator already restricts this endpoint to admin/manager
         user_role = session.get('role')
-        user_id = session.get('user_id')
         if user_role not in ('admin', 'manager'):
-            # if you have a created_by column, use it; otherwise deny unless admin/manager
-            cursor.execute("SELECT created_by FROM financial_records WHERE id = %s", (tx_id,))
-            row = cursor.fetchone()
-            created_by = row.get('created_by') if row else None
-            if created_by is None or int(created_by) != int(user_id):
-                cursor.close()
-                connection.close()
-                return jsonify({'error': 'Permission denied'}), 403
+            cursor.close()
+            connection.close()
+            return jsonify({'error': 'Permission denied'}), 403
 
         # prepare updates (only provided fields)
         fields = []
@@ -1489,6 +1897,24 @@ def global_search():
             LIMIT 5
         """, (f'%{query}%', f'%{query}%', f'%{query}%', f'%{query}%'))
         results['farms'] = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT e.*, f.name as farm_name, 'equipment' as result_type
+            FROM equipment e
+            JOIN farms f ON e.farm_id = f.id
+            WHERE e.equipment_name LIKE %s OR e.equipment_type LIKE %s OR e.brand LIKE %s
+            LIMIT 5
+        """, (f'%{query}%', f'%{query}%', f'%{query}%'))
+        results['equipment'] = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT i.*, f.name as farm_name, 'inventory' as result_type
+            FROM inventory i
+            JOIN farms f ON i.farm_id = f.id
+            WHERE i.item_name LIKE %s OR i.category LIKE %s OR i.supplier LIKE %s
+            LIMIT 5
+        """, (f'%{query}%', f'%{query}%', f'%{query}%'))
+        results['inventory'] = cursor.fetchall()
         
         cursor.close()
         connection.close()
@@ -1611,14 +2037,6 @@ def financial_summary_report():
         """)
         revenue_by_category = cursor.fetchall()
         
-        # If no revenue data, provide sample data
-        if not revenue_by_category:
-            revenue_by_category = [
-                {'category': 'Crop Sales', 'total': 500000, 'transaction_count': 25},
-                {'category': 'Livestock Sales', 'total': 300000, 'transaction_count': 15},
-                {'category': 'Equipment Rental', 'total': 75000, 'transaction_count': 8}
-            ]
-        
         # Expenses by category
         cursor.execute("""
             SELECT 
@@ -1633,14 +2051,6 @@ def financial_summary_report():
         """)
         expense_by_category = cursor.fetchall()
         
-        # If no expense data, provide sample data
-        if not expense_by_category:
-            expense_by_category = [
-                {'category': 'Labor', 'total': 200000, 'transaction_count': 45},
-                {'category': 'Supplies', 'total': 150000, 'transaction_count': 30},
-                {'category': 'Equipment', 'total': 80000, 'transaction_count': 12}
-            ]
-        
         cursor.close()
         connection.close()
         
@@ -1651,19 +2061,7 @@ def financial_summary_report():
         
     except Error as e:
         print(f"Database error in financial summary: {e}")
-        # Return sample data if database error
-        return jsonify({
-            'revenue_by_category': [
-                {'category': 'Crop Sales', 'total': 500000, 'transaction_count': 25},
-                {'category': 'Livestock Sales', 'total': 300000, 'transaction_count': 15},
-                {'category': 'Equipment Rental', 'total': 75000, 'transaction_count': 8}
-            ],
-            'expense_by_category': [
-                {'category': 'Labor', 'total': 200000, 'transaction_count': 45},
-                {'category': 'Supplies', 'total': 150000, 'transaction_count': 30},
-                {'category': 'Equipment', 'total': 80000, 'transaction_count': 12}
-            ]
-        })
+        return jsonify({'error': 'Database error'}), 500
 
 @app.route('/api/reports/crop-yield-comparison')
 @login_required
@@ -1692,15 +2090,6 @@ def crop_yield_comparison():
         
         yield_data = cursor.fetchall()
         
-        # If no yield data, provide sample data
-        if not yield_data:
-            yield_data = [
-                {'crop_name': 'Maize', 'avg_expected_yield': 1200, 'avg_actual_yield': 1100, 'crop_count': 5},
-                {'crop_name': 'Beans', 'avg_expected_yield': 800, 'avg_actual_yield': 750, 'crop_count': 4},
-                {'crop_name': 'Wheat', 'avg_expected_yield': 900, 'avg_actual_yield': 850, 'crop_count': 3},
-                {'crop_name': 'Rice', 'avg_expected_yield': 1000, 'avg_actual_yield': 950, 'crop_count': 2}
-            ]
-        
         cursor.close()
         connection.close()
         
@@ -1708,13 +2097,7 @@ def crop_yield_comparison():
         
     except Error as e:
         print(f"Database error in crop yield comparison: {e}")
-        # Return sample data
-        return jsonify([
-            {'crop_name': 'Maize', 'avg_expected_yield': 1200, 'avg_actual_yield': 1100, 'crop_count': 5},
-            {'crop_name': 'Beans', 'avg_expected_yield': 800, 'avg_actual_yield': 750, 'crop_count': 4},
-            {'crop_name': 'Wheat', 'avg_expected_yield': 900, 'avg_actual_yield': 850, 'crop_count': 3},
-            {'crop_name': 'Rice', 'avg_expected_yield': 1000, 'avg_actual_yield': 950, 'crop_count': 2}
-        ])
+        return jsonify({'error': 'Database error'}), 500
     
 @app.route('/api/analytics/farm-performance')
 @login_required
@@ -1790,10 +2173,6 @@ def seasonal_trends():
         
         trends = cursor.fetchall()
         
-        # If no trend data, generate sample data for last 12 months
-        if not trends:
-            trends = generate_sample_trends()
-        
         cursor.close()
         connection.close()
         
@@ -1801,32 +2180,88 @@ def seasonal_trends():
         
     except Error as e:
         print(f"Database error in seasonal trends: {e}")
-        return jsonify(generate_sample_trends())
+        return jsonify({'error': 'Database error'}), 500
 
-def generate_sample_trends():
-    """Generate sample trend data for the last 12 months"""
-    import random
-    from datetime import datetime, timedelta
-    
-    trends = []
-    today = datetime.now()
-    
-    for i in range(11, -1, -1):
-        month_date = today - timedelta(days=30*i)
-        # Seasonal variation - higher in harvest months
-        seasonal_factor = 1.2 if month_date.month in [8, 9, 10] else 0.8 if month_date.month in [1, 2, 12] else 1.0
-        
-        revenue = random.randint(200000, 500000) * seasonal_factor
-        expenses = random.randint(100000, 300000)
-        
-        trends.append({
-            'year': month_date.year,
-            'month': month_date.month,
-            'revenue': revenue,
-            'expenses': expenses
-        })
-    
-    return trends
+# ----------------- Saved Reports (uses `reports` table) -----------------
+@app.route('/api/reports/saved', methods=['GET'])
+@login_required
+def get_saved_reports():
+    """Get all saved reports"""
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT r.id, r.farm_id, r.report_type, r.report_date, r.data, r.notes,
+                   r.created_at, f.name as farm_name, u.username as created_by_name
+            FROM reports r
+            JOIN farms f ON r.farm_id = f.id
+            LEFT JOIN users u ON r.created_by = u.id
+            ORDER BY r.created_at DESC
+            LIMIT 50
+        """)
+        saved = cursor.fetchall()
+        cursor.close()
+        connection.close()
+        return jsonify(saved)
+    except Error as e:
+        print(f"Database error in saved reports: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+@app.route('/api/reports/save', methods=['POST'])
+@login_required
+@role_required('admin', 'manager')
+def save_report():
+    """Save the current report snapshot to the database"""
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    report_name = (data.get('name') or '').strip()
+    if not report_name:
+        return jsonify({'error': 'Report name is required'}), 400
+
+    farm_id = data.get('farm_id')
+    if not farm_id:
+        return jsonify({'error': 'A farm must be selected to save the report'}), 400
+
+    report_type = data.get('report_type') or 'performance'
+    description = data.get('description') or ''
+    snapshot = data.get('data') or {}
+
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        # Verify farm exists
+        cursor.execute("SELECT id FROM farms WHERE id = %s", (farm_id,))
+        if not cursor.fetchone():
+            cursor.close()
+            connection.close()
+            return jsonify({'error': 'Selected farm not found'}), 404
+
+        cursor = connection.cursor()
+        cursor.execute("""
+            INSERT INTO reports (farm_id, report_type, report_date, data, notes, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            farm_id,
+            report_type,
+            date.today(),
+            json.dumps(snapshot),
+            f"{report_name}: {description}".strip(': '),
+            session.get('user_id')
+        ))
+        connection.commit()
+        report_id = cursor.lastrowid
+        cursor.close()
+        connection.close()
+        return jsonify({'id': report_id, 'message': f'Report "{report_name}" saved successfully'})
+    except Error as e:
+        print(f"Database error saving report: {e}")
+        return jsonify({'error': 'Database error'}), 500
     
 @app.route('/api/user/preferences', methods=['GET', 'POST'])
 @login_required
@@ -1921,8 +2356,11 @@ def delete_farm(farm_id):
         
         cursor.execute("SELECT COUNT(*) as count FROM equipment WHERE farm_id = %s", (farm_id,))
         equipment_count = cursor.fetchone()['count']
+
+        cursor.execute("SELECT COUNT(*) as count FROM inventory WHERE farm_id = %s", (farm_id,))
+        inventory_count = cursor.fetchone()['count']
         
-        if any([crop_count > 0, livestock_count > 0, task_count > 0, labour_count > 0, financial_count > 0, equipment_count > 0]):
+        if any([crop_count > 0, livestock_count > 0, task_count > 0, labour_count > 0, financial_count > 0, equipment_count > 0, inventory_count > 0]):
             cursor.close()
             connection.close()
             return jsonify({
@@ -1933,7 +2371,8 @@ def delete_farm(farm_id):
                     'tasks': task_count,
                     'workers': labour_count,
                     'financial_records': financial_count,
-                    'equipment': equipment_count
+                    'equipment': equipment_count,
+                    'inventory': inventory_count
                 }
             }), 400
         
@@ -2216,6 +2655,69 @@ def delete_weather_data(weather_id):
         return jsonify({'error': 'Database error'}), 500
     
 
+@app.route('/api/weather', methods=['GET'])
+@login_required
+def get_weather_data():
+    """Get recent weather records (optionally filtered by farm)"""
+    farm_id = request.args.get('farm_id')
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor(dictionary=True)
+        query = """
+            SELECT w.*, f.name as farm_name
+            FROM weather_data w
+            JOIN farms f ON w.farm_id = f.id
+        """
+        params = []
+        if farm_id:
+            query += " WHERE w.farm_id = %s"
+            params.append(farm_id)
+        query += " ORDER BY w.record_date DESC LIMIT 100"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        cursor.close()
+        connection.close()
+        return jsonify(rows)
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
+@app.route('/api/weather', methods=['POST'])
+@login_required
+@role_required('admin', 'manager')
+@validate_json('farm_id', 'record_date')
+def create_weather_record():
+    """Record a weather observation for a farm"""
+    data = request.get_json()
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Database connection failed'}), 500
+    try:
+        cursor = connection.cursor()
+        cursor.execute("""
+            INSERT INTO weather_data (farm_id, record_date, temperature, rainfall, humidity, notes)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (
+            data.get('farm_id'),
+            data.get('record_date'),
+            data.get('temperature'),
+            data.get('rainfall'),
+            data.get('humidity'),
+            data.get('notes'),
+        ))
+        connection.commit()
+        record_id = cursor.lastrowid
+        cursor.close()
+        connection.close()
+        return jsonify({'id': record_id, 'message': 'Weather record added successfully'})
+    except Error as e:
+        print(f"Database error: {e}")
+        return jsonify({'error': 'Database error'}), 500
+
+
 # Bulk Delete endpoint for multiple items
 @app.route('/api/bulk-delete', methods=['POST'])
 @login_required
@@ -2318,7 +2820,9 @@ def enhanced_dashboard_stats():
                 (SELECT COUNT(*) FROM tasks WHERE status = 'completed' 
                  AND due_date >= DATE_SUB(CURRENT_DATE, INTERVAL 7 DAY)) as completed_tasks,
                 
-                (SELECT COUNT(*) FROM tasks WHERE status = 'overdue') as overdue_tasks,
+                (SELECT COUNT(*) FROM tasks
+                 WHERE status NOT IN ('completed', 'cancelled')
+                 AND due_date < CURDATE()) as overdue_tasks,
                 
                 -- Efficiency metrics
                 (SELECT AVG(DATEDIFF(harvest_date, planting_date)) 
@@ -2380,19 +2884,34 @@ def performance_trends():
     try:
         cursor = connection.cursor(dictionary=True)
         
-        # Monthly performance trends
+        # Monthly performance trends (last 12 months, zero-filled)
         cursor.execute("""
-            SELECT 
-                DATE_FORMAT(transaction_date, '%Y-%m') as month,
-                SUM(CASE WHEN transaction_type = 'revenue' THEN amount ELSE 0 END) as revenue,
-                SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END) as expenses,
-                COUNT(DISTINCT CASE WHEN fr.transaction_date >= DATE_SUB(fr.transaction_date, INTERVAL 30 DAY) THEN fr.id END) as transactions,
-                (SELECT COUNT(*) FROM crops WHERE DATE_FORMAT(planting_date, '%Y-%m') = DATE_FORMAT(transaction_date, '%Y-%m')) as crops_planted,
-                (SELECT COUNT(*) FROM livestock WHERE DATE_FORMAT(birth_date, '%Y-%m') = DATE_FORMAT(transaction_date, '%Y-%m')) as livestock_born
-            FROM financial_records fr
-            WHERE transaction_date >= DATE_SUB(CURRENT_DATE, INTERVAL 12 MONTH)
-            GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
-            ORDER BY month
+            SELECT
+                m.month,
+                COALESCE(fin.revenue, 0) as revenue,
+                COALESCE(fin.expenses, 0) as expenses,
+                COALESCE(fin.transactions, 0) as transactions,
+                (SELECT COUNT(*) FROM crops c
+                 WHERE DATE_FORMAT(c.planting_date, '%Y-%m') = m.month) as crops_planted,
+                (SELECT COUNT(*) FROM livestock l
+                 WHERE DATE_FORMAT(l.birth_date, '%Y-%m') = m.month) as livestock_born
+            FROM (
+                SELECT DATE_FORMAT(DATE_SUB(CURRENT_DATE, INTERVAL n MONTH), '%Y-%m') as month
+                FROM (SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4
+                      UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8
+                      UNION SELECT 9 UNION SELECT 10 UNION SELECT 11) nums
+            ) m
+            LEFT JOIN (
+                SELECT
+                    DATE_FORMAT(transaction_date, '%Y-%m') as month,
+                    SUM(CASE WHEN transaction_type = 'revenue' THEN amount ELSE 0 END) as revenue,
+                    SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END) as expenses,
+                    COUNT(*) as transactions
+                FROM financial_records
+                WHERE transaction_date >= DATE_SUB(CURRENT_DATE, INTERVAL 12 MONTH)
+                GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
+            ) fin ON fin.month = m.month
+            ORDER BY m.month
         """)
         
         trends = cursor.fetchall()
@@ -2650,8 +3169,8 @@ def get_crop_performance(cursor):
 def get_livestock_analysis(cursor):
     """Livestock health and productivity analysis"""
     cursor.execute("""
-        SELECT 
-            species,
+        SELECT
+            animal_type as species,
             COUNT(*) as total_count,
             SUM(CASE WHEN gender = 'male' THEN 1 ELSE 0 END) as males,
             SUM(CASE WHEN gender = 'female' THEN 1 ELSE 0 END) as females,
@@ -2661,17 +3180,10 @@ def get_livestock_analysis(cursor):
             -- Health analysis
             SUM(CASE WHEN health_status = 'healthy' THEN 1 ELSE 0 END) as healthy_count,
             SUM(CASE WHEN health_status = 'sick' THEN 1 ELSE 0 END) as sick_count,
-            SUM(CASE WHEN health_status = 'injured' THEN 1 ELSE 0 END) as injured_count,
-            
-            -- Productivity metrics
-            (SELECT COUNT(*) FROM livestock_products 
-             WHERE livestock_id = livestock.id AND product_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) as recent_products,
-             
-            -- Breeding analysis
-            (SELECT COUNT(*) FROM livestock WHERE mother_id = livestock.id) as offspring_count
-            
-        FROM livestock 
-        GROUP BY species
+            SUM(CASE WHEN health_status = 'injured' THEN 1 ELSE 0 END) as injured_count
+
+        FROM livestock
+        GROUP BY animal_type
         ORDER BY total_count DESC
     """)
     
@@ -2681,26 +3193,30 @@ def get_operational_efficiency(cursor):
     """Operational efficiency metrics"""
     cursor.execute("""
         SELECT 
-            -- Task completion efficiency
-            (SELECT COUNT(*) FROM tasks WHERE status = 'completed' 
-             AND completed_date <= due_date) as on_time_tasks,
-            (SELECT COUNT(*) FROM tasks WHERE status = 'completed' 
-             AND completed_date > due_date) as late_tasks,
-            (SELECT COUNT(*) FROM tasks WHERE status = 'pending') as pending_tasks,
-            
-            -- Resource utilization
-            (SELECT AVG(DATEDIFF(completed_date, created_date)) 
+            (SELECT COUNT(*) FROM tasks
+             WHERE status = 'completed'
+             AND (due_date IS NULL OR COALESCE(completed_date, DATE(updated_at)) <= due_date)) as on_time_tasks,
+            (SELECT COUNT(*) FROM tasks
+             WHERE status = 'completed'
+             AND due_date IS NOT NULL
+             AND COALESCE(completed_date, DATE(updated_at)) > due_date) as late_tasks,
+            (SELECT COUNT(*) FROM tasks
+             WHERE status IN ('todo', 'in_progress', 'blocked')) as pending_tasks,
+
+            (SELECT AVG(DATEDIFF(COALESCE(completed_date, DATE(updated_at)), DATE(created_at)))
              FROM tasks WHERE status = 'completed') as avg_completion_days,
-             
-            -- Equipment efficiency
-            (SELECT COUNT(*) FROM equipment WHERE status = 'operational') as operational_equipment,
-            (SELECT COUNT(*) FROM equipment WHERE status = 'maintenance') as maintenance_equipment,
-            (SELECT AVG(DATEDIFF(maintenance_due, CURDATE())) 
+
+            (SELECT COUNT(*) FROM equipment
+             WHERE condition_status IN ('excellent', 'good')) as operational_equipment,
+            (SELECT COUNT(*) FROM equipment
+             WHERE condition_status IN ('fair', 'poor', 'broken')
+                OR (maintenance_due IS NOT NULL AND maintenance_due <= CURDATE())) as maintenance_equipment,
+            (SELECT AVG(DATEDIFF(maintenance_due, CURDATE()))
              FROM equipment WHERE maintenance_due > CURDATE()) as avg_days_until_maintenance,
-             
-            -- Labor efficiency
-            (SELECT COUNT(DISTINCT assigned_to) FROM tasks 
-             WHERE status = 'completed' AND completed_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) as active_workers
+
+            (SELECT COUNT(DISTINCT assigned_to) FROM tasks
+             WHERE status = 'completed'
+             AND COALESCE(completed_date, DATE(updated_at)) >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)) as active_workers
     """)
     
     return cursor.fetchone()
@@ -2708,31 +3224,42 @@ def get_operational_efficiency(cursor):
 def get_seasonal_trends(cursor):
     """Seasonal performance trends"""
     cursor.execute("""
-        SELECT 
-            YEAR(transaction_date) as year,
-            MONTH(transaction_date) as month,
-            CASE 
-                WHEN MONTH(transaction_date) IN (12, 1, 2) THEN 'Winter'
-                WHEN MONTH(transaction_date) IN (3, 4, 5) THEN 'Spring'
-                WHEN MONTH(transaction_date) IN (6, 7, 8) THEN 'Summer'
-                WHEN MONTH(transaction_date) IN (9, 10, 11) THEN 'Autumn'
+        SELECT
+            f.year,
+            f.month,
+            CASE
+                WHEN f.month IN (12, 1, 2) THEN 'Winter'
+                WHEN f.month IN (3, 4, 5) THEN 'Spring'
+                WHEN f.month IN (6, 7, 8) THEN 'Summer'
+                WHEN f.month IN (9, 10, 11) THEN 'Autumn'
             END as season,
-            
-            SUM(CASE WHEN transaction_type = 'revenue' THEN amount ELSE 0 END) as seasonal_revenue,
-            SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END) as seasonal_expenses,
-            
-            (SELECT COUNT(*) FROM crops 
-             WHERE MONTH(planting_date) = MONTH(transaction_date)
-             AND YEAR(planting_date) = YEAR(transaction_date)) as crops_planted,
-             
-            (SELECT COUNT(*) FROM livestock 
-             WHERE MONTH(birth_date) = MONTH(transaction_date)
-             AND YEAR(birth_date) = YEAR(transaction_date)) as livestock_born
-            
-        FROM financial_records 
-        WHERE transaction_date >= DATE_SUB(CURRENT_DATE, INTERVAL 24 MONTH)
-        GROUP BY YEAR(transaction_date), MONTH(transaction_date), season
-        ORDER BY year, month
+            f.seasonal_revenue,
+            f.seasonal_expenses,
+            COALESCE(cp.crops_planted, 0) as crops_planted,
+            COALESCE(lb.livestock_born, 0) as livestock_born
+        FROM (
+            SELECT
+                YEAR(transaction_date) as year,
+                MONTH(transaction_date) as month,
+                SUM(CASE WHEN transaction_type = 'revenue' THEN amount ELSE 0 END) as seasonal_revenue,
+                SUM(CASE WHEN transaction_type = 'expense' THEN amount ELSE 0 END) as seasonal_expenses
+            FROM financial_records
+            WHERE transaction_date >= DATE_SUB(CURRENT_DATE, INTERVAL 24 MONTH)
+            GROUP BY YEAR(transaction_date), MONTH(transaction_date)
+        ) f
+        LEFT JOIN (
+            SELECT YEAR(planting_date) as year, MONTH(planting_date) as month, COUNT(*) as crops_planted
+            FROM crops
+            WHERE planting_date IS NOT NULL
+            GROUP BY YEAR(planting_date), MONTH(planting_date)
+        ) cp ON cp.year = f.year AND cp.month = f.month
+        LEFT JOIN (
+            SELECT YEAR(birth_date) as year, MONTH(birth_date) as month, COUNT(*) as livestock_born
+            FROM livestock
+            WHERE birth_date IS NOT NULL
+            GROUP BY YEAR(birth_date), MONTH(birth_date)
+        ) lb ON lb.year = f.year AND lb.month = f.month
+        ORDER BY f.year, f.month
     """)
     
     return cursor.fetchall()
@@ -2890,10 +3417,10 @@ def calculate_summary_metrics(farm_analysis):
         return {}
     
     total_farms = len(farm_analysis)
-    total_revenue = sum(farm['total_revenue'] for farm in farm_analysis)
-    total_expenses = sum(farm['total_expenses'] for farm in farm_analysis)
+    total_revenue = float(sum(farm['total_revenue'] or 0 for farm in farm_analysis))
+    total_expenses = float(sum(farm['total_expenses'] or 0 for farm in farm_analysis))
     total_profit = total_revenue - total_expenses
-    total_area = sum(farm['size_acres'] for farm in farm_analysis)
+    total_area = float(sum(farm['size_acres'] or 0 for farm in farm_analysis))
     
     return {
         'total_farms': total_farms,
@@ -3003,6 +3530,8 @@ def generate_uganda_insights(total_farms, total_revenue, cursor):
     """Generate Uganda-specific farming insights"""
     from datetime import datetime, timedelta
     import random
+
+    total_revenue = float(total_revenue or 0)
     
     current_month = datetime.now().month
     current_season = get_uganda_season(current_month)
@@ -3176,18 +3705,19 @@ def get_uganda_risk_alerts(season, cursor):
         try:
             # Check for low inventory
             cursor.execute("""
-                SELECT item_name, current_stock, min_stock 
-                FROM inventory 
-                WHERE current_stock <= min_stock
+                SELECT item_name, quantity
+                FROM inventory
+                WHERE quantity <= 10
+                ORDER BY quantity ASC
                 LIMIT 2
             """)
             low_stock = cursor.fetchall()
-            
+
             for item in low_stock:
                 alerts.append({
                     'type': 'inventory',
                     'severity': 'high',
-                    'message': f"Low stock: {item['item_name']} ({item['current_stock']} remaining)",
+                    'message': f"Low stock: {item['item_name']} ({item['quantity']} remaining)",
                     'action': 'Restock inventory immediately'
                 })
         except Error:

@@ -177,6 +177,17 @@
 
 {% block scripts %}
 <script>
+// Utility function to escape HTML to prevent XSS
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 let livestockData = [];
 let farmsData = [];
 
@@ -283,45 +294,88 @@ function populateAnimalTypes() {
 }
 
 function displayLivestock(livestock) {
-    const columns = [
-        { title: 'Tag Number', data: 'tag_number' },
-        { title: 'Type', data: 'animal_type' },
-        { title: 'Breed', data: 'breed' },
-        { title: 'Farm', data: 'farm_name' },
-        { title: 'Gender', data: 'gender', render: (value) => value ? value.charAt(0).toUpperCase() + value.slice(1) : 'N/A' },
-        { title: 'Weight (kg)', data: 'weight', render: (value) => value ? formatNumber(value, 1) : 'N/A' },
-        { title: 'Health Status', data: 'health_status', render: (value) => createStatusBadge(value) },
-        { title: 'Birth Date', data: 'birth_date', render: (value) => value ? formatDate(value) : 'N/A' },
-        { title: 'Actions', data: 'id', render: (id, row) => {
-            let actions = `
-            <button class="btn btn-sm btn-outline-primary" onclick="viewLivestock(${id})" title="View">
-                <i class="fas fa-eye"></i>
-            </button>
-            `;
-            if (['admin','manager'].includes(userRole)) {
-                actions += `
-                <button class="btn btn-sm btn-outline-success ms-1" onclick="editLivestock(${id})" title="Edit">
-                    <i class="fas fa-edit"></i>
-                </button>
-                <div class="btn-group ms-1">
-                    <button class="btn btn-sm btn-outline-warning dropdown-toggle" type="button" data-bs-toggle="dropdown" title="Health">
-                        <i class="fas fa-heartbeat"></i>
-                    </button>
-                    <ul class="dropdown-menu">
-                        <li><a class="dropdown-item text-success" href="#" onclick="updateHealthStatus(${id}, 'healthy')">Mark Healthy</a></li>
-                        <li><a class="dropdown-item text-warning" href="#" onclick="updateHealthStatus(${id}, 'sick')">Mark Sick</a></li>
-                        <li><a class="dropdown-item text-danger" href="#" onclick="updateHealthStatus(${id}, 'injured')">Mark Injured</a></li>
-                        <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item text-dark" href="#" onclick="deleteLivestock(${id})">Delete</a></li>
-                    </ul>
-                </div>
-                `;
-            }
-            return `<div class="btn-group">${actions}</div>`;
-        } }
-    ];
+    const container = document.getElementById('livestockTable');
+    
+    if (livestock.length === 0) {
+        container.innerHTML = '<div class="text-center p-4"><p>No livestock found</p></div>';
+        return;
+    }
 
-    createDataTable('livestockTable', livestock, columns);
+    let html = `
+        <div class="table-responsive">
+            <table class="table table-striped table-hover table-sm">
+                <thead>
+                    <tr>
+                        <th width="12%">Tag Number</th>
+                        <th width="10%">Type</th>
+                        <th width="12%">Breed</th>
+                        <th width="12%">Farm</th>
+                        <th width="8%">Gender</th>
+                        <th width="10%">Weight (kg)</th>
+                        <th width="15%">Health Status</th>
+                        <th width="10%">Birth Date</th>
+                        <th width="11%">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+    `;
+
+    livestock.forEach(animal => {
+        const healthMap = {
+            'healthy': { class: 'bg-success', text: 'Healthy', icon: 'fa-heartbeat' },
+            'sick': { class: 'bg-danger', text: 'Sick', icon: 'fa-procedures' },
+            'injured': { class: 'bg-warning', text: 'Injured', icon: 'fa-crutch' },
+            'deceased': { class: 'bg-secondary', text: 'Deceased', icon: 'fa-times' }
+        };
+        const health = healthMap[animal.health_status] || { class: 'bg-secondary', text: animal.health_status, icon: 'fa-question' };
+
+        html += `
+            <tr>
+                <td><strong>${escapeHtml(animal.tag_number || 'N/A')}</strong></td>
+                <td><small>${escapeHtml(animal.animal_type || 'N/A')}</small></td>
+                <td><small>${escapeHtml(animal.breed || '-')}</small></td>
+                <td><small>${escapeHtml(animal.farm_name || 'N/A')}</small></td>
+                <td><small>${animal.gender ? animal.gender.charAt(0).toUpperCase() + animal.gender.slice(1) : 'N/A'}</small></td>
+                <td><small>${animal.weight ? formatNumber(animal.weight, 1) : '-'}</small></td>
+                <td>
+                    <span class="badge ${health.class}">
+                        <i class="fas ${health.icon} me-1"></i>${health.text}
+                    </span>
+                </td>
+                <td><small>${animal.birth_date ? formatDateShort(animal.birth_date) : '-'}</small></td>
+                <td>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-primary" onclick="viewLivestock(${animal.id})" title="View">
+                            <i class="fas fa-eye"></i>
+                        </button>
+                        ${['admin','manager'].includes(userRole) ? `
+                        <button class="btn btn-outline-success" onclick="editLivestock(${animal.id})" title="Edit">
+                            <i class="fas fa-edit"></i>
+                        </button>
+                        <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" title="More">
+                            <i class="fas fa-ellipsis-v"></i>
+                        </button>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item text-success" href="#" onclick="updateHealthStatus(${animal.id}, 'healthy')">Mark Healthy</a></li>
+                            <li><a class="dropdown-item text-warning" href="#" onclick="updateHealthStatus(${animal.id}, 'sick')">Mark Sick</a></li>
+                            <li><a class="dropdown-item text-danger" href="#" onclick="updateHealthStatus(${animal.id}, 'injured')">Mark Injured</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item text-danger" href="#" onclick="deleteLivestock(${animal.id})">Delete</a></li>
+                        </ul>
+                        ` : ''}
+                    </div>
+                </td>
+            </tr>
+        `;
+    });
+
+    html += `
+                </tbody>
+            </table>
+        </div>
+    `;
+
+    container.innerHTML = html;
 }
 
 function filterLivestock() {

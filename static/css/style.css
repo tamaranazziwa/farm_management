@@ -1,18 +1,18 @@
 /* Farm Management System Styles */
 
 :root {
-    --primary-color: #2c5530;
-    --secondary-color: #4a7c59;
-    --accent-color: #7fb069;
-    --light-green: #a8d5a8;
-    --dark-green: #1a3d1a;
-    --text-dark: #2c3e50;
-    --text-light: #6c757d;
-    --bg-light: #f8f9fa;
+    --primary-color: #1a2e1f;
+    --secondary-color: #2d4a35;
+    --accent-color: #3d5c45;
+    --light-green: #eef2ee;
+    --dark-green: #0f1a12;
+    --text-dark: #1a2332;
+    --text-light: #5c6670;
+    --bg-light: #f4f5f6;
     --bg-white: #ffffff;
-    --border-color: #dee2e6;
-    --shadow: 0 2px 4px rgba(0,0,0,0.1);
-    --shadow-lg: 0 4px 8px rgba(0,0,0,0.15);
+    --border-color: #d8dde3;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
 * {
@@ -35,11 +35,12 @@ body {
     left: 0;
     height: 100vh;
     width: 250px;
-    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    background: var(--primary-color);
     color: white;
     z-index: 1000;
     transition: all 0.3s ease;
     box-shadow: var(--shadow-lg);
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .sidebar-header {
@@ -163,7 +164,7 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    background: var(--bg-light);
 }
 
 .login-form-container {
@@ -175,8 +176,9 @@ body {
 .login-form {
     background: white;
     padding: 2rem;
-    border-radius: 10px;
+    border-radius: 8px;
     box-shadow: var(--shadow-lg);
+    border: 1px solid var(--border-color);
 }
 
 .login-header {
@@ -700,21 +702,21 @@ body {
 
 /* Slightly narrower sidebar so links have more vertical room */
 .sidebar {
-  width: 220px; /* from 250 -> 220 */
+  width: 200px; /* further reduced from 220 -> 200 */
 }
 
 /* Make main content move to match new width */
 .main-content {
-  margin-left: 220px; /* must match .sidebar width */
+  margin-left: 200px; /* must match .sidebar width */
 }
 
 /* Compact the header where "Farm Management" sits */
 .sidebar-header {
-  padding: 1.2rem 1.5rem; /* reduce top/bottom */
+  padding: 0.8rem 1rem; /* further reduced padding */
   text-align: left;
 }
 .sidebar-header h3 {
-  font-size: 1rem;   /* smaller title */
+  font-size: 0.9rem;   /* even smaller title */
   font-weight: 600;
   margin: 0;
   white-space: nowrap;
@@ -724,23 +726,23 @@ body {
 
 /* Reduce individual nav item height and spacing */
 .sidebar .nav-link {
-  padding: 0.45rem 0.9rem; /* vertical reduced from 0.8rem */
-  font-size: 0.92rem;      /* slightly smaller text */
+  padding: 0.35rem 0.7rem; /* further reduced vertical padding */
+  font-size: 0.85rem;      /* smaller text */
   display: flex;
   align-items: center;
 }
 
 /* Make the icon a bit tighter */
 .sidebar .nav-link i {
-  margin-right: 0.5rem; /* previously 0.8rem */
-  width: 18px;
+  margin-right: 0.4rem; /* reduced from 0.5rem */
+  width: 16px;
   text-align: center;
-  font-size: 0.95rem;
+  font-size: 0.85rem;
 }
 
 /* Reduce spacing between nav items */
 .sidebar .nav {
-  padding: 0.6rem 0; /* less top/bottom padding */
+  padding: 0.4rem 0; /* less top/bottom padding */
 }
 
 /* Footer (username + logout) compressed and moved inline */
@@ -749,7 +751,7 @@ body {
   bottom: 0;
   left: 0;
   right: 0;
-  padding: 0.45rem 0.6rem; /* reduce padding */
+  padding: 0.35rem 0.5rem; /* further reduced padding */
   border-top: 1px solid rgba(255,255,255,0.06);
   background: linear-gradient(0deg, rgba(255,255,255,0.02), rgba(255,255,255,0.00));
 }
@@ -759,18 +761,21 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.3rem;
   color: rgba(255,255,255,0.9);
-  font-size: 0.9rem;
+  font-size: 0.8rem; /* smaller font */
   white-space: nowrap;
   overflow: hidden;
 }
 
 /* keep username short and ellipsize if long */
-.user-info i { margin-right: 0.4rem; }
+.user-info i { 
+  margin-right: 0.3rem; 
+  font-size: 0.8rem;
+}
 .user-info > span, .user-info > a { 
   display: inline-block;
-  max-width: 110px;    /* limit space used by username to prevent push */
+  max-width: 85px;    /* further reduced space */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -779,10 +784,10 @@ body {
 /* logout button smaller */
 .logout-btn {
   color: rgba(255,255,255,0.75);
-  font-size: 0.85rem;
+  font-size: 0.75rem; /* smaller */
   margin-top: 0;
-  padding: 0.25rem 0.4rem;
-  border-radius: 4px;
+  padding: 0.2rem 0.3rem; /* smaller padding */
+  border-radius: 3px;
   border: 1px solid rgba(255,255,255,0.06);
   background: transparent;
   text-decoration: none;
@@ -793,10 +798,11 @@ body {
 
 /* Mobile / narrow screens: keep compact but allow collapse */
 @media (max-width: 768px) {
-  .sidebar { width: 200px; }
-  .main-content { margin-left: 200px; }
-  .sidebar-header h3 { font-size: 0.98rem; }
-  .user-info > a { max-width: 90px; }
+  .sidebar { width: 180px; }
+  .main-content { margin-left: 180px; }
+  .sidebar-header h3 { font-size: 0.85rem; }
+  .user-info > a { max-width: 70px; }
+  .sidebar .nav-link { font-size: 0.8rem; }
 }
 
 /* Enhanced Alert Styles */
@@ -1414,19 +1420,8 @@ body {
     }
 }
 
-/* Dark mode support */
-@media (prefers-color-scheme: dark) {
-    .stat-card-sm,
-    .insight-card,
-    .activity-item {
-        background: var(--card-bg-dark);
-        color: var(--text-light);
-    }
-    
-    .insight-content h6 {
-        color: var(--text-light);
-    }
-}
+/* Note: dark mode intentionally disabled to keep a consistent,
+   professional light interface across the application. */
 
 /* Fixed Activity Item Styles */
 .activity-item {

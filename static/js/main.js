@@ -1,5 +1,16 @@
 // Farm Management System - Main JavaScript
 
+// Utility function to escape HTML to prevent XSS
+function escapeHtml(text) {
+    if (!text) return '';
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
 // Update current time
 function updateCurrentTime() {
     const now = new Date();
@@ -38,12 +49,6 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // Utility functions
-function formatCurrency(amount) {
-    if (amount === null || amount === undefined || isNaN(Number(amount))) return 'UGX 0';
-    return 'UGX ' + new Intl.NumberFormat('en-UG').format(Number(amount));
-}
-
-// Enhanced currency formatting for Ugandan Shillings
 function formatCurrency(amount) {
     if (amount === null || amount === undefined || isNaN(Number(amount))) return 'UGX 0';
     return 'UGX ' + new Intl.NumberFormat('en-UG').format(Number(amount));
@@ -429,19 +434,40 @@ function buildFilterUrl(baseUrl, filters) {
 }
 
 // Enhanced export with date ranges
-function exportToCSV(data, filename, includeTimestamp = true) {
+function exportToCSV(data, filenameOrHeaders, includeTimestampOrFilename) {
     if (!data || data.length === 0) {
         showError(document.body, 'No data to export');
         return;
     }
     
-    const headers = Object.keys(data[0]);
+    // Handle both 2-arg (data, filename) and 3-arg (data, headers, filename) signatures
+    let headers, filename, includeTimestamp;
+    
+    if (Array.isArray(filenameOrHeaders)) {
+        // 3-arg signature: exportToCSV(data, headers, filename)
+        headers = filenameOrHeaders;
+        filename = includeTimestampOrFilename;
+        includeTimestamp = false;
+    } else {
+        // 2-arg signature: exportToCSV(data, filename)
+        headers = Object.keys(data[0]);
+        filename = filenameOrHeaders;
+        includeTimestamp = includeTimestampOrFilename !== undefined ? includeTimestampOrFilename : true;
+    }
+    
     let csvContent = [
         headers.join(','),
-        ...data.map(row => headers.map(header => {
-            const value = row[header] || '';
-            return `"${String(value).replace(/"/g, '""')}"`;
-        }).join(','))
+        ...data.map(row => {
+            // If row is an array (pre-formatted data), use it directly
+            if (Array.isArray(row)) {
+                return row.map(field => `"${String(field).replace(/"/g, '""')}"`).join(',');
+            }
+            // Otherwise, map using headers
+            return headers.map(header => {
+                const value = row[header] || '';
+                return `"${String(value).replace(/"/g, '""')}"`;
+            }).join(',');
+        })
     ].join('\n');
     
     // Add timestamp to filename
@@ -891,4 +917,66 @@ function deleteItem(apiEndpoint, id, itemType) {
         console.error('Delete error:', error);
         showError(document.body, `Failed to delete ${itemType}`);
     });
+}
+
+// Additional helper functions used in templates
+function formatDateShort(dateString) {
+    if (!dateString) return '-';
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function formatNumberCompact(value, decimals = 1) {
+    if (value === null || value === undefined) return '-';
+    return parseFloat(value).toFixed(decimals);
+}
+
+// Override showError to accept element or message
+function showError(elementOrMessage, message) {
+    if (message === undefined) {
+        // First argument is the message, show on body
+        const alertDiv = document.createElement('div');
+        alertDiv.className = 'alert alert-danger alert-dismissible fade show';
+        alertDiv.innerHTML = `
+            <i class="fas fa-exclamation-triangle"></i> ${elementOrMessage}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        
+        const content = document.querySelector('.content');
+        if (content) {
+            content.insertBefore(alertDiv, content.firstChild);
+            setTimeout(() => {
+                if (alertDiv.parentNode) {
+                    alertDiv.remove();
+                }
+            }, 5000);
+        }
+    } else {
+        // First argument is element, second is message
+        elementOrMessage.innerHTML = `
+            <div class="alert alert-danger" role="alert">
+                <i class="fas fa-exclamation-triangle"></i> ${message}
+            </div>
+        `;
+    }
+}
+
+// Override showSuccess to accept message only
+function showSuccess(message) {
+    const alertDiv = document.createElement('div');
+    alertDiv.className = 'alert alert-success alert-dismissible fade show';
+    alertDiv.innerHTML = `
+        <i class="fas fa-check-circle"></i> ${message}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    `;
+    
+    const content = document.querySelector('.content');
+    if (content) {
+        content.insertBefore(alertDiv, content.firstChild);
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.remove();
+            }
+        }, 5000);
+    }
 }
